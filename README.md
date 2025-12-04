@@ -1,4 +1,4 @@
-# Privacyswap
+# Privacyswap (private swap , send , bridge on solana )
 Private swap on solana
 # Privacy Swap SDK 
 
