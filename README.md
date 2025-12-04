@@ -175,3 +175,48 @@ Install
 ```bash
 git clone https://github.com/defiden04-prog/Privacyswap.git
 cd Privacyswap
+
+# Privacy Swap & Zcash ↔ Solana Bridge (MVP)
+
+This repository contains an MVP bridge that lets users "wrap" Zcash (ZEC) into an SPL token on Solana (wZEC) and redeem it the other direction via a trusted relayer.
+
+Important notes
+- This is a minimal trusted-relayer design: the relayer is the mint authority of the wZEC SPL token and mints/burns tokens when it observes the corresponding Zcash or Solana locks/burns.
+- For Zcash → Solana, the user must send ZEC to a configured "burn address" and include the destination Solana pubkey in an OP_RETURN (nulldata) output. This is NOT shielded — it is an MVP trade-off to complete the integration.
+- For Solana → Zcash, the user burns wZEC on Solana or submits a signed withdrawal request; the relayer then sends ZEC on Zcash to the requested address.
+- Do not use this on mainnet until you perform thorough security and legal review and add decentralized relayers / dispute resolution / on-chain proofs.
+
+Repository contents
+- relayer/: Off-chain relayer that watches Zcash, mints on Solana, and processes withdrawals.
+- solana-client/: Minimal TypeScript helpers for interacting with the wZEC mint and for burning tokens (users).
+- .env_sample: environment configuration example
+- README.md: this document
+
+Design / Flows
+1) Mint (Zcash → Solana)
+- User crafts a Zcash testnet transaction that sends N ZEC to BURN_ADDRESS and includes an OP_RETURN output with the recipient Solana pubkey (UTF-8).
+- Relayer polls Zcash RPC, detects the burn Tx, parses the recipient pubkey and amount, and mints the equivalent wZEC to recipient's associated SPL token account.
+
+2) Redeem (Solana → Zcash)
+- User burns wZEC on Solana (or calls an off-chain API which will perform the burn for them) and includes the recipient Zcash address (transparent or shielded) in the memo or a signed withdrawal request.
+- Relayer monitors Solana burns / receives the withdrawal request, and sends ZEC via Zcash RPC to recipient.
+
+Security & Operational Notes
+- Private keys: the relayer requires:
+  - Zcash RPC credentials (user/password or an RPC endpoint)
+  - Relayer Solana keypair (mint authority keypair) — keep this safe; rotate if compromised.
+- Use environment variables and CI secrets — never commit keys into the repo.
+- Consider multi-sig for mint authority, or a PDA-based mint authority requiring multiple off-chain signers, for higher security.
+
+Prerequisites
+- Node.js 18+
+- npm or yarn
+- Solana CLI / connection (devnet recommended)
+- Zcash testnet RPC endpoint (run zcashd testnet or use a provider)
+
+Getting started (local / devnet)
+1. Clone & install
+```bash
+git clone <your-repo>
+cd <your-repo>
+# We'll run relayer and solana client separately
