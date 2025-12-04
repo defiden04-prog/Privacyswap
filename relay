@@ -1,0 +1,215 @@
+import axios from 'axios';
+import dotenv from 'dotenv';
+import bs58 from 'bs58';
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  Transaction,
+  sendAndConfirmTransaction,
+} from '@solana/web3.js';
+import {
+  createMintToInstruction,
+  getOrCreateAssociatedTokenAccount,
+  TOKEN_PROGRAM_ID,
+} from '@solana/spl-token';
+import fs from 'fs';
+import path from 'path';
+
+dotenv.config();
+
+// Basic configuration from env
+const ZCASH_RPC_URL = process.env.ZCASH_RPC_URL!;
+const ZCASH_RPC_USER = process.env.ZCASH_RPC_USER || '';
+const ZCASH_RPC_PASSWORD = process.env.ZCASH_RPC_PASSWORD || '';
+const BURN_ADDRESS = process.env.ZCASH_BURN_ADDRESS || process.env.ZCASH_BURN_ADDRESS || '';
+const POLL_INTERVAL_SECONDS = parseInt(process.env.POLL_INTERVAL_SECONDS || '10', 10);
+const MIN_CONFIRMATIONS = parseInt(process.env.MIN_CONFIRMATIONS || '2', 10);
+
+const SOLANA_CLUSTER = process.env.SOLANA_CLUSTER || 'https://api.devnet.solana.com';
+const WZEC_MINT = new PublicKey(process.env.WZEC_MINT!);
+
+// Load relayer keypair (either JSON array or base58)
+function loadRelayerKeypair(): Keypair {
+  const json = process.env.RELAYER_SOL_SECRET_JSON;
+  if (!json) throw new Error('RELAYER_SOL_SECRET_JSON required in env');
+  try {
+    const arr = JSON.parse(json);
+    const u8 = Uint8Array.from(arr);
+    return Keypair.fromSecretKey(u8);
+  } catch {
+    // not JSON array, try base58
+    try {
+      const u8 = bs58.decode(json);
+      return Keypair.fromSecretKey(u8);
+    } catch (e) {
+      throw new Error('RELAYER_SOL_SECRET_JSON parse failed: provide secret key as JSON array or base58 string');
+    }
+  }
+}
+
+const relayer = loadRelayerKeypair();
+const connection = new Connection(SOLANA_CLUSTER, 'confirmed');
+
+/*
+  Zcash RPC helpers (very lightweight):
+  We call getblockcount, getblockhash, getblock, getrawtransaction.
+  This expects a zcashd-compatible RPC (testnet). If you run a zcashd on localhost,
+  set ZCASH_RPC_URL, ZCASH_RPC_USER, ZCASH_RPC_PASSWORD accordingly.
+*/
+async function zcashRpc(method: string, params: any[] = []) {
+  const id = Date.now();
+  const payload = { jsonrpc: '1.0', id, method, params };
+  const auth = ZCASH_RPC_USER ? { username: ZCASH_RPC_USER, password: ZCASH_RPC_PASSWORD } : undefined;
+  const res = await axios.post(ZCASH_RPC_URL, payload, {
+    auth: auth as any,
+    timeout: 30_000,
+  });
+  if (res.data.error) throw new Error(JSON.stringify(res.data.error));
+  return res.data.result;
+}
+
+// parse OP_RETURN (nulldata) from a decoded transaction vout
+function parseOpReturnFromVout(vout: any): string | null {
+  try {
+    if (!vout.scriptPubKey) return null;
+    const spk = vout.scriptPubKey;
+    if (spk.type === 'nulldata' && spk.hex) {
+      // hex to utf8
+      const buf = Buffer.from(spk.hex, 'hex');
+      return buf.toString('utf8');
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Convert ZEC amount (e.g., 1.234) -> smallest units (we'll use 1e8 like satoshis)
+function zecToAtomic(zecAmount: number): bigint {
+  return BigInt(Math.round(zecAmount * 1e8));
+}
+
+// Convert ZEC atomic -> token smallest units on Solana (token decimals)
+function zecAtomicToTokenAmount(zecAtomic: bigint, tokenDecimals: number = 8): bigint {
+  // both use 1e8 decimals by default; if token decimals == 8, pass-through
+  if (tokenDecimals === 8) return zecAtomic;
+  // scale
+  if (tokenDecimals > 8) {
+    const factor = BigInt(10) ** BigInt(tokenDecimals - 8);
+    return zecAtomic * factor;
+  } else {
+    const factor = BigInt(10) ** BigInt(8 - tokenDecimals);
+    return zecAtomic / factor;
+  }
+}
+
+let lastProcessedBlock = 0;
+
+async function init() {
+  // get current block count and start from max(0, count - 5) to avoid race
+  const height = await zcashRpc('getblockcount', []);
+  lastProcessedBlock = Math.max(0, height - MIN_CONFIRMATIONS - 1);
+  console.log('Starting relayer: current zcash height', height, 'starting at', lastProcessedBlock);
+  pollLoop();
+}
+
+async function pollLoop() {
+  try {
+    const height = await zcashRpc('getblockcount', []);
+    while (lastProcessedBlock + MIN_CONFIRMATIONS < height) {
+      lastProcessedBlock++;
+      try {
+        await processBlock(lastProcessedBlock);
+      } catch (e) {
+        console.error('Error processing block', lastProcessedBlock, e);
+      }
+    }
+  } catch (e) {
+    console.error('Error polling zcash RPC', e);
+  } finally {
+    setTimeout(pollLoop, POLL_INTERVAL_SECONDS * 1000);
+  }
+}
+
+async function processBlock(blockHeight: number) {
+  console.log('Processing zcash block', blockHeight);
+  const blockHash = await zcashRpc('getblockhash', [blockHeight]);
+  // getblock with verbosity 2 (zcash/bitcoin) provides tx details (for some builds)
+  const block = await zcashRpc('getblock', [blockHash, 2]);
+  if (!block || !block.tx) {
+    console.log('No txs in block', blockHeight);
+    return;
+  }
+  for (const tx of block.tx) {
+    // tx.vout array
+    for (const vout of tx.vout) {
+      // check if this output goes to burn address
+      const addresses = (vout.scriptPubKey && vout.scriptPubKey.addresses) || [];
+      const containsBurn = addresses.includes(BURN_ADDRESS);
+      if (containsBurn) {
+        // extract OP_RETURN for recipient solana pubkey
+        let solanaRecipient: string | null = null;
+        for (const v of tx.vout) {
+          const op = parseOpReturnFromVout(v);
+          if (op) {
+            // expect OP_RETURN to contain a Solana base58 pubkey in ASCII
+            solanaRecipient = op.trim();
+            break;
+          }
+        }
+        if (!solanaRecipient) {
+          console.warn('Burn to BURN_ADDRESS without OP_RETURN -> skipping:', tx.txid);
+          continue;
+        }
+        const zecAmount = parseFloat(String(vout.value));
+        console.log(`Detected burn tx ${tx.txid}: amount=${zecAmount} to recipient=${solanaRecipient}`);
+        try {
+          await handleZcashBurn(tx.txid, zecAmount, solanaRecipient);
+        } catch (e) {
+          console.error('Failed to handle burn', e);
+        }
+      }
+    }
+  }
+}
+
+async function handleZcashBurn(txid: string, zecAmount: number, solanaRecipient: string) {
+  // Convert to atomic units and to token amount
+  const atomic = zecToAtomic(zecAmount);
+  // token decimals: assuming wZEC token uses 8 decimals to match ZEC
+  const tokenAmount = zecAtomicToTokenAmount(atomic, 8);
+
+  // Ensure recipient has associated token account for WZEC
+  const recipientPubkey = new PublicKey(solanaRecipient);
+  const payer = relayer;
+
+  console.log('Ensuring associated token account for recipient', recipientPubkey.toBase58());
+  const recipientAta = await getOrCreateAssociatedTokenAccount(
+    connection,
+    payer, // fee payer
+    WZEC_MINT,
+    recipientPubkey,
+    false, // allow owner off curve
+  );
+
+  // Build mintTo instruction (relayer is expected to be mint authority)
+  const mintToIx = createMintToInstruction(
+    WZEC_MINT,
+    recipientAta.address,
+    relayer.publicKey,
+    Number(tokenAmount), // this expects number < 2^53; if bigger, use another mechanism
+    [], // signers
+  );
+
+  const tx = new Transaction().add(mintToIx);
+
+  console.log('Sending mint to', recipientPubkey.toBase58(), 'amount', tokenAmount.toString());
+  const sig = await sendAndConfirmTransaction(connection, tx, [relayer], { commitment: 'confirmed' });
+  console.log('Mint tx sent, signature', sig, 'for zcash tx', txid);
+}
+
+init().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
