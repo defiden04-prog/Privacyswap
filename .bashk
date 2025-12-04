@@ -1,0 +1,4 @@
+# install spl-token CLI if you want, or programmatically create. Example:
+spl-token create-token --decimals 8 --fee-payer relayer.json --owner <relayer_pubkey>
+spl-token create-account <MINT_ADDRESS> --owner <recipient_pubkey>
+# capture the MINT_ADDRESS value for .env
