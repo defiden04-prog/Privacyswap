@@ -1,6 +1,6 @@
 # Privacyswap
 Private swap on solana
-# Privacy Swap SDK (Devnet integration guide)
+# Privacy Swap SDK 
 
 This SDK provides programmatic access to Privacy Swap primitives. This repository is a TypeScript / Node.js SDK designed to work against devnet and mainnet.
 
