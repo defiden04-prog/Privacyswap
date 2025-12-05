@@ -220,3 +220,246 @@ Getting started (local / devnet)
 git clone <your-repo>
 cd <your-repo>
 # We'll run relayer and solana client separately
+🔐 PrivacySwap
+Private Swap · Private Send · Private Bridge on Solana
+
+PrivacySwap is a Solana-native privacy protocol that enables users to swap, send, and bridge assets privately using a shared anonymity pool powered by commitments, nullifiers, Zcash-inspired privacy, and unlinkable transactions.
+
+The protocol breaks the on-chain connection between sender → recipient, deposit → withdraw, and source chain → destination chain.
+
+Built for speed, privacy, developers, and serious trading.
+
+🚀 Features
+🔄 Private Swap
+
+Swap tokens privately on Solana without exposing wallet balances or trading patterns.
+
+No on-chain link between wallet & trade
+
+Uses private withdraw → clean wallet → DEX route
+
+Supports Raydium, Jupiter, and aggregator order flow
+
+💸 Private Send
+
+Send tokens privately to any wallet (including new users).
+
+Perfect for payroll, treasury ops, OTC deals
+
+Funds arrive without exposing sender identity
+
+🌉 Private Bridge
+
+Bridge funds cross-chain while hiding the origin chain and wallet.
+
+Deposits enter the privacy pool
+
+Withdraw on destination chain using fresh wallet
+
+No traceable bridging path
+
+🛡️ Privacy Layer
+
+Powered by:
+
+Commitment-based shielding
+
+Nullifier spend protection
+
+Escrow-controlled SPL vault
+
+Zcash-style proof workflow (MVP uses preimage mode)
+
+📦 Repository Structure
+privacy-swap/
+│
+├─ programs/
+│  └─ privacy_pool/        # Anchor program (Rust)
+│
+├─ sdk/                    # JS/TS SDK (note creation, commitments)
+│
+├─ relayer/                # Withdraw relayer (Node + Anchor client)
+│
+├─ app/                    # Frontend (Next.js + Tailwind)
+│   └─ web/
+│       └─ pages/
+│
+├─ scripts/                # Devnet scripts: deploy, init escrow, test flows
+│
+└─ docs/                   # Documentation (GitBook / Notion / MkDocs-ready)
+
+🧠 How PrivacySwap Works
+1️⃣ Shield (Deposit)
+
+User generates a note:
+
+secret || amount || recipient || salt
+
+
+Then computes a commitment:
+
+commitment = SHA256(preimage)
+
+
+User deposits SPL tokens → Escrow vault and calls deposit(commitment).
+
+2️⃣ Store Commitment
+
+The Anchor program stores:
+
+commitment
+
+amount
+
+spent=false
+
+3️⃣ Unshield (Withdraw)
+
+User withdraws tokens privately by proving ownership of the commitment.
+
+MVP mode → Preimage reveal (development only)
+Production → Zcash-style ZK proof (no reveal)
+
+4️⃣ Swap / Send / Bridge
+
+After private withdraw → user actions are unlinkable:
+
+Swap on Raydium/Jupiter
+
+Send privately to any wallet
+
+Bridge cross-chain via clean wallet
+
+🛠️ Installation (Devnet)
+Install dependencies
+anchor build
+yarn install
+cd relayer && yarn install
+cd app && yarn install
+
+Deploy program to Devnet
+solana airdrop 2
+anchor deploy
+
+Initialize escrow vault
+ts-node scripts/init-escrow.ts
+
+Start the relayer
+cd relayer
+yarn start
+
+Start the frontend
+cd app
+yarn dev
+# Open http://localhost:3000
+
+🚧 Developer Guide
+🔹 Generate a Note
+import { generateNote } from "./sdk";
+
+const note = generateNote(1_000_000, recipientPubkey);
+console.log(note.commitment_hex);
+
+🔹 Deposit (Client → Program)
+anchor run deposit
+
+
+or via script:
+
+await program.methods
+  .deposit(commitment, amount)
+  .accounts({...})
+  .rpc();
+
+🔹 Withdraw (Client → Relayer → Program)
+curl -X POST http://localhost:3333/withdraw \
+  -d '{ "preimage_hex":"...", "amount":1000000, "recipient":"...", "recipient_token_account":"..." }'
+
+🗺️ Architecture
+User Wallet
+   ↓
+Frontend (Next.js) — creates notes, commitments
+   ↓
+SDK — serialization, hashing, proof-placeholder
+   ↓
+Anchor Program — stores commitments & nullifiers
+   ↓
+Escrow PDA — holds SPL tokens
+   ↓
+Relayer — submits withdraw txs
+   ↓
+DEX / Wallet / Bridge — private funding environment
+
+
+More detailed diagrams are available in /docs/.
+
+🔐 Security Notes
+
+⚠️ MVP is NOT production-ready. Do NOT use with real funds.
+
+The MVP uses preimage-based withdrawal, which must be replaced before mainnet:
+❌ Preimage → relayer sees secret
+✔️ Replace with Zcash-style zero-knowledge proof
+✔️ Add encrypted witness submission
+✔️ Add local proving and auditor selective disclosure
+
+Audits are required for:
+
+Anchor smart contracts
+
+Relayer + SDK
+
+Frontend input validation
+
+🔌 API Overview
+Relayer API
+
+POST /withdraw
+
+Body:
+
+{
+  "preimage_hex": "...",
+  "amount": 1000000,
+  "recipient": "<Pubkey>",
+  "recipient_token_account": "<ATA>"
+}
+
+
+Return:
+
+{ "tx": "<transaction_signature>" }
+
+🧭 Roadmap
+Phase 1 — MVP
+
+✔ Commitment store
+✔ Nullifier spend protection
+✔ Escrow vault
+✔ Relayer (centralized)
+✔ Next.js UI
+
+Phase 2 — Advanced Privacy
+
+🔄 Zcash-style proofs
+🔄 Client-side proving
+🔄 Encrypted witness to relayer
+
+Phase 3 — Scaling
+
+🔄 Relayer pool
+🔄 Proof batching
+🔄 Multi-chain private bridge
+
+🤝 Contributing
+
+Contributions are welcome!
+Feel free to open issues, PRs, or request architectural improvements.
+
+📄 License
+
+MIT License — free to use, modify, ship.
+
+⭐ Support the Project
+
+If you like PrivacySwap, consider starring the repo ❤️
